@@ -6,6 +6,8 @@
 #include <link.h>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
+#include <array>
 
 #include <pl/memory/Hook.hpp>
 
@@ -23,12 +25,25 @@ constexpr std::uintptr_t kKnownCallerRVA[] = {
     0x108C9DC8, 0x108CA268, 0x108CBDD0,
 };
 
+constexpr std::size_t kCallerCount = 7;
+constexpr std::uint64_t kLogThrottleMs = 500; // max 2 log/detik per caller
+
 std::uintptr_t gMcBase = 0;
 void* gOriginal = nullptr;
 
 // State per-caller buat correlation manual: kamu toggle lewat command
 // atau cukup baca logcat sambil gerakin pandangan ke block.
 bool gSelectionVisibleHint = false; // isi manual lewat command in-game kalau ada
+
+// Timestamp (ms) terakhir kali tiap caller berhasil log.
+std::array<std::uint64_t, kCallerCount> gLastLogMs{};
+
+std::uint64_t nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()
+    ).count();
+}
 
 std::uintptr_t findLibraryBase(const char* soName) {
     std::uintptr_t base = 0;
@@ -50,7 +65,7 @@ int matchCaller(std::uintptr_t returnAddr) {
     if (!gMcBase || returnAddr < gMcBase) return -1;
     const std::uintptr_t rva = returnAddr - gMcBase;
 
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < static_cast<int>(kCallerCount); ++i) {
         // toleransi kecil karena LR biasa nunjuk instruksi SETELAH BL,
         // sedangkan RVA di tabel adalah alamat instruksi BL itu sendiri.
         if (rva >= kKnownCallerRVA[i] && rva <= kKnownCallerRVA[i] + 8) {
@@ -67,15 +82,21 @@ void glUniform4fvDetour(int32_t location, int32_t count, const float* value) {
     const int idx = matchCaller(returnAddr);
 
     if (idx >= 0) {
-        LOGI(
-            "[uniform_probe] caller#%d rva=0x%llx loc=%d count=%d "
-            "v=(%.3f %.3f %.3f %.3f) selectionHint=%d",
-            idx,
-            static_cast<unsigned long long>(returnAddr - gMcBase),
-            location, count,
-            value[0], value[1], value[2], value[3],
-            gSelectionVisibleHint
-        );
+        const std::uint64_t t = nowMs();
+
+        if (t - gLastLogMs[idx] >= kLogThrottleMs) {
+            gLastLogMs[idx] = t;
+
+            LOGI(
+                "[uniform_probe] caller#%d rva=0x%llx loc=%d count=%d "
+                "v=(%.3f %.3f %.3f %.3f) selectionHint=%d",
+                idx,
+                static_cast<unsigned long long>(returnAddr - gMcBase),
+                location, count,
+                value[0], value[1], value[2], value[3],
+                gSelectionVisibleHint
+            );
+        }
     }
 
     using Fn = void (*)(int32_t, int32_t, const float*);
