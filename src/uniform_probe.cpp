@@ -61,6 +61,38 @@ std::uintptr_t findLibraryBase(const char* soName) {
     return base;
 }
 
+// Log semua library ter-load yang relevan sama rendering backend,
+// supaya bisa dikonfirmasi apakah game ini pakai Vulkan atau GLES
+// murni (atau translation layer seperti ANGLE/SwiftShader/gxcore).
+void logLoadedRenderLibraries() {
+    static const char* kInteresting[] = {
+        "vulkan",
+        "GLES",
+        "angle",
+        "swiftshader",
+        "gxcore",
+    };
+
+    dl_iterate_phdr([](dl_phdr_info* info, size_t, void*) -> int {
+        if (!info->dlpi_name || info->dlpi_name[0] == '\0') {
+            return 0;
+        }
+
+        for (const char* keyword : kInteresting) {
+            if (std::strstr(info->dlpi_name, keyword)) {
+                LOGI(
+                    "[uniform_probe] loaded render-related lib: %s (base=%p)",
+                    info->dlpi_name,
+                    reinterpret_cast<void*>(info->dlpi_addr)
+                );
+                break;
+            }
+        }
+
+        return 0; // lanjut ke library berikutnya, jangan berhenti
+    }, nullptr);
+}
+
 int matchCaller(std::uintptr_t returnAddr) {
     if (!gMcBase || returnAddr < gMcBase) return -1;
     const std::uintptr_t rva = returnAddr - gMcBase;
@@ -106,6 +138,10 @@ void glUniform4fvDetour(int32_t location, int32_t count, const float* value) {
 }
 
 bool install() {
+    // Diagnostik: cek dulu library render apa saja yang dipakai
+    // proses ini, sebelum coba hook GLES.
+    logLoadedRenderLibraries();
+
     gMcBase = findLibraryBase("libminecraftpe.so");
     if (!gMcBase) {
         LOGE("[uniform_probe] libminecraftpe.so base not found");
